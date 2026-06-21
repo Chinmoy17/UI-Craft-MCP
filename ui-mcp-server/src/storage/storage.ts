@@ -71,6 +71,7 @@ export interface ProjectContext {
   stack: string
   audience: string
   industry: string
+  design_system: string
   brand: BrandContext
   device_targets: string[]
   custom_rules: string[]
@@ -253,6 +254,7 @@ export interface ProjectContextUpdate {
   stack?: string
   audience?: string
   industry?: string
+  design_system?: string
   brand?: {
     primary_color?: string
     font?: string
@@ -363,6 +365,7 @@ const DEFAULT_CONTEXT: ProjectContext = {
   stack: '',
   audience: '',
   industry: '',
+  design_system: '',
   brand: {
     primary_color: '',
     font: '',
@@ -754,8 +757,51 @@ function ensureStorageDir(): ReturnType<typeof getStoragePaths> {
   return storagePaths
 }
 
+/**
+ * Load .env file from the storage directory into process.env.
+ * Only sets variables that are not already defined (env vars take precedence).
+ * Creates a .env.example if no .env exists.
+ */
+let _envLoaded = false
+function loadEnvFile(storageDir: string): void {
+  if (_envLoaded) return
+  _envLoaded = true
+
+  const envFile = path.join(storageDir, '.env')
+  const exampleFile = path.join(storageDir, '.env.example')
+
+  if (!fs.existsSync(envFile)) {
+    // Create .env.example as a hint for new developers
+    if (!fs.existsSync(exampleFile)) {
+      try {
+        fs.writeFileSync(exampleFile, '# UI Craft Design System Key\n# UI_CRAFT_DS_KEY=your-passphrase-here\n')
+      } catch { /* non-critical */ }
+    }
+    return
+  }
+
+  try {
+    const content = fs.readFileSync(envFile, 'utf-8')
+    for (const line of content.split('\n')) {
+      const trimmed = line.trim()
+      if (!trimmed || trimmed.startsWith('#')) continue
+      const eqIndex = trimmed.indexOf('=')
+      if (eqIndex < 1) continue
+      const key = trimmed.slice(0, eqIndex).trim()
+      const value = trimmed.slice(eqIndex + 1).trim()
+      // Only set if not already defined — system env takes precedence
+      if (!process.env[key]) {
+        process.env[key] = value
+      }
+    }
+  } catch { /* non-critical — .env loading must never break tool execution */ }
+}
+
 export function initContextSystem(): void {
   const storagePaths = ensureStorageDir()
+
+  // Load .env before anything else — keys may be needed by downstream modules
+  loadEnvFile(storagePaths.storageDir)
 
   if (!fs.existsSync(storagePaths.contextFile)) {
     fs.writeFileSync(storagePaths.contextFile, JSON.stringify(DEFAULT_CONTEXT, null, 2))
