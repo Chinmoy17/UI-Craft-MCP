@@ -69,6 +69,7 @@ const projectContextShape = {
   stack: z.string().optional(),
   audience: z.string().optional(),
   industry: z.string().optional(),
+  design_system: z.string().optional().describe('Name of the active design system (e.g. "bytemethod"). When set, design output follows that system\'s tokens and rules.'),
   brand: z.object({
     primary_color: z.string().optional(),
     font: z.string().optional(),

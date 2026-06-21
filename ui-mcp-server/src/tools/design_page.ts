@@ -2,6 +2,7 @@ import { z } from 'zod'
 import * as fs from 'fs'
 import * as path from 'path'
 import { loadContext, loadState, saveState, type ProjectContext } from '../storage/storage.js'
+import { getEncryptionKey, decryptDesignSystem } from '../crypto/design_system_crypto.js'
 
 // ─── KB types ────────────────────────────────────────────────────────────────
 
@@ -216,6 +217,58 @@ interface KBIndustryEntry {
 
 type KBIndustryPatterns = Record<string, KBIndustryEntry>
 
+// ─── Design system spec type ─────────────────────────────────────────────────
+
+interface DesignSystemPaletteRoles {
+  primary_action: string
+  primary_action_hover: string
+  body_text: string
+  heading_text: string
+  subtle_text: string
+  border: string
+  background: string
+  surface: string
+  contrast_section_bg: string[]
+  disabled: string
+}
+
+interface DesignSystemTypography {
+  body: { font_family: string; weight: number; size: string; line_height: string; color: string }
+  headings: { font_family: string; weight_range: string; color: string }
+  buttons: { font_family: string; weight: number; size: string }
+}
+
+interface DesignSystemButton {
+  font_family: string
+  font_size: string
+  font_weight: number
+  padding: string
+  border_radius: string
+  border: string
+  background: string
+  color: string
+  hover_background: string
+  transition: string
+  cursor: string
+}
+
+interface DesignSystemSpec {
+  id: string
+  name: string
+  description: string
+  palette: Record<string, string>
+  palette_roles: DesignSystemPaletteRoles
+  palette_rules: string[]
+  typography: DesignSystemTypography
+  typography_rules: string[]
+  buttons: { primary: DesignSystemButton; secondary: DesignSystemButton }
+  button_rules: string[]
+  spacing: { principle: string; notes: string }
+  shadows: { principle: string; notes: string }
+  rules_do: string[]
+  rules_dont: string[]
+}
+
 // ─── KB loaders — singleton cache (loaded once, reused for every call) ────────
 
 const KB_BASE      = path.join(__dirname, '..', 'content', 'kb')
@@ -228,6 +281,7 @@ const KB_A11Y      = path.join(KB_BASE, 'accessibility')
 const KB_INTERACT  = path.join(KB_BASE, 'interaction')
 const KB_COPY      = path.join(KB_BASE, 'copy')
 const KB_INDUSTRY  = path.join(KB_BASE, 'industry')
+const KB_DS        = path.join(KB_BASE, 'design-system')
 const CONTENT_BASE = path.join(__dirname, '..', 'content')
 
 let _kbVisualPrinciples: KBVisualPrinciple[] | null = null
@@ -249,6 +303,7 @@ let _kbUXWriting: KBUXWriting | null | false = false
 let _kbIndustryPatterns: KBIndustryPatterns | null | false = false
 let _kbBrandExtended: KBBrandExample[] | null = null
 let _allPrinciples: Principle[] | null = null
+const _designSystemCache = new Map<string, DesignSystemSpec | null>()
 
 // Inverted indexes built once from loaded principles
 const _pageTypeIndex = new Map<string, Set<string>>()   // page_type → principle ids
@@ -391,6 +446,40 @@ function loadKBA11yAria(): KBGenericObject | null {
   const file = path.join(KB_A11Y, 'accessibility_aria.json')
   _kbA11yAria = fs.existsSync(file) ? (JSON.parse(fs.readFileSync(file, 'utf-8')) as KBGenericObject) : null
   return _kbA11yAria
+}
+
+function loadDesignSystem(name: string): DesignSystemSpec | null {
+  if (_designSystemCache.has(name)) return _designSystemCache.get(name) ?? null
+
+  // Try encrypted file first (.enc)
+  const encFile = path.join(KB_DS, `${name}.enc`)
+  if (fs.existsSync(encFile)) {
+    const key = getEncryptionKey()
+    if (!key) {
+      // No key available — cannot decrypt. Graceful degradation.
+      _designSystemCache.set(name, null)
+      return null
+    }
+    try {
+      const encBuffer = fs.readFileSync(encFile)
+      const plaintext = decryptDesignSystem(encBuffer, key)
+      const spec = JSON.parse(plaintext) as DesignSystemSpec
+      _designSystemCache.set(name, spec)
+      return spec
+    } catch {
+      // Wrong key or corrupt file — graceful degradation.
+      _designSystemCache.set(name, null)
+      return null
+    }
+  }
+
+  // Fallback to plaintext JSON (local dev without encryption)
+  const jsonFile = path.join(KB_DS, `${name}.json`)
+  const spec = fs.existsSync(jsonFile)
+    ? (JSON.parse(fs.readFileSync(jsonFile, 'utf-8')) as DesignSystemSpec)
+    : null
+  _designSystemCache.set(name, spec)
+  return spec
 }
 
 function buildInvertedIndexes(principles: Principle[]): void {
@@ -845,6 +934,7 @@ const DOMAIN_KEYWORDS: Record<string, string[]> = {
   brand:      ['brand', 'identity', 'emotion', 'tone', 'feel', 'personality', 'voice', 'style'],
   visual:     ['visual', 'icon', 'illustration', 'image', 'graphic', 'balance', 'gestalt', 'proximity',
                'grouping', 'whitespace', 'density'],
+  design_system: ['design system', 'design tokens', 'bytemethod', 'byte method'],
 }
 
 const REDO_KEYWORDS = ['redo', 'revisit', 'reconsider', 'different', 'change', 'not happy',
@@ -856,6 +946,7 @@ interface DomainFlags {
   layout: boolean
   brand: boolean
   visual: boolean
+  design_system: boolean
 }
 
 /**
@@ -870,12 +961,13 @@ interface DomainFlags {
 function resolveNeededDomains(
   contextText: string,
   sessionMode: 'full' | 'progressive',
-  resolvedDomains: string[]
+  resolvedDomains: string[],
+  hasDesignSystem: boolean,
 ): { flags: DomainFlags; clearedByRedo: string[] } {
   // full mode: always load everything
   if (sessionMode === 'full') {
     return {
-      flags: { typography: true, color: true, layout: true, brand: true, visual: true },
+      flags: { typography: true, color: true, layout: true, brand: true, visual: true, design_system: hasDesignSystem },
       clearedByRedo: [],
     }
   }
@@ -883,7 +975,7 @@ function resolveNeededDomains(
   // progressive mode: first call (nothing resolved yet) = full pass
   if (resolvedDomains.length === 0) {
     return {
-      flags: { typography: true, color: true, layout: true, brand: true, visual: true },
+      flags: { typography: true, color: true, layout: true, brand: true, visual: true, design_system: hasDesignSystem },
       clearedByRedo: [],
     }
   }
@@ -892,7 +984,7 @@ function resolveNeededDomains(
   const hasRedo = REDO_KEYWORDS.some(k => lower.includes(k))
   const clearedByRedo: string[] = []
 
-  const flags: DomainFlags = { typography: false, color: false, layout: false, brand: false, visual: false }
+  const flags: DomainFlags = { typography: false, color: false, layout: false, brand: false, visual: false, design_system: false }
 
   for (const domain of Object.keys(DOMAIN_KEYWORDS) as Array<keyof DomainFlags>) {
     const isResolved = resolvedDomains.includes(domain)
@@ -948,9 +1040,13 @@ export function designPage(input: DesignPageInput): string {
   const resolvedDomains = state.active_page.resolved_domains ?? []
   const contextText   = [context ?? '', projectCtx.industry, audience].join(' ')
 
-  const { flags, clearedByRedo } = resolveNeededDomains(contextText, sessionMode, resolvedDomains)
+  const hasDesignSystem = !!projectCtx.design_system
+  const { flags, clearedByRedo } = resolveNeededDomains(contextText, sessionMode, resolvedDomains, hasDesignSystem)
 
   // ── Load only flagged KB modules ───────────────────────────────────────────
+  const designSystem        = flags.design_system && projectCtx.design_system
+                                ? loadDesignSystem(projectCtx.design_system)
+                                : null
   const kbVisualPrinciples  = flags.visual     ? loadKBVisualPrinciples()     : []
   const kbBrandExamples     = flags.brand      ? loadKBBrandExamples()        : []
   const kbBrandExtended     = flags.brand      ? loadKBBrandExtended()        : []
@@ -1027,7 +1123,15 @@ export function designPage(input: DesignPageInput): string {
     : ''
 
   const layoutSection = flags.layout
-    ? `\n## Layout Recommendation\n${LAYOUT_ADVICE[page_type]?.[emphasis] ?? ''}${layoutKBSection}${copyKBSection}`
+    ? `\n## Layout Recommendation\n${LAYOUT_ADVICE[page_type]?.[emphasis] ?? ''}${layoutKBSection}${copyKBSection}` +
+      (designSystem
+        ? `\n\n### ${designSystem.name} Button Specs\n` +
+          `**Primary:** ${designSystem.buttons.primary.font_family} ${designSystem.buttons.primary.font_weight} ${designSystem.buttons.primary.font_size} · ` +
+          `padding ${designSystem.buttons.primary.padding} · radius ${designSystem.buttons.primary.border_radius} · ` +
+          `bg ${designSystem.buttons.primary.background} → hover ${designSystem.buttons.primary.hover_background}\n` +
+          `**Secondary:** bg ${designSystem.buttons.secondary.background} · border ${designSystem.buttons.secondary.border} → hover ${designSystem.buttons.secondary.hover_background}\n` +
+          designSystem.button_rules.map(r => `- ${r}`).join('\n')
+        : '')
     : ''
 
   // Typography — static advice always with KB enrichment only when flagged
@@ -1083,7 +1187,18 @@ export function designPage(input: DesignPageInput): string {
     : ''
 
   const typographySection = flags.typography
-    ? `\n## Typography\n${typoAdvice}${typoFontSection}${typoRolesSection}${typoPatternsSection}${typoAntipatternsSection}`
+    ? designSystem
+      ? `\n## Typography — ${designSystem.name}\n` +
+        designSystem.typography_rules.map(r => `- ${r}`).join('\n') +
+        `\n\n### Font Specs\n` +
+        `**Body:** ${designSystem.typography.body.font_family} · weight ${designSystem.typography.body.weight} · ` +
+        `${designSystem.typography.body.size}/${designSystem.typography.body.line_height} · color ${designSystem.typography.body.color}\n` +
+        `**Headings:** ${designSystem.typography.headings.font_family} · weight ${designSystem.typography.headings.weight_range} · ` +
+        `color ${designSystem.typography.headings.color}\n` +
+        `**Buttons:** ${designSystem.typography.buttons.font_family} · weight ${designSystem.typography.buttons.weight} · ` +
+        `${designSystem.typography.buttons.size}` +
+        `${typoAntipatternsSection}`
+      : `\n## Typography\n${typoAdvice}${typoFontSection}${typoRolesSection}${typoPatternsSection}${typoAntipatternsSection}`
     : ''
 
   // Color
@@ -1115,7 +1230,24 @@ export function designPage(input: DesignPageInput): string {
         : '')
     : ''
   const colorSection = flags.color
-    ? `\n## Color Strategy\n${COLOR_ADVICE[emphasis] ?? ''}${colorKBSection}`
+    ? designSystem
+      ? `\n## Color Strategy — ${designSystem.name}\n` +
+        `**Palette:** Grayscale only.\n` +
+        Object.entries(designSystem.palette).map(([k, v]) => `\`${k}\`: ${v}`).join(' · ') + '\n\n' +
+        `**Roles:**\n` +
+        `- Primary action: ${designSystem.palette_roles.primary_action} → hover ${designSystem.palette_roles.primary_action_hover}\n` +
+        `- Body text: ${designSystem.palette_roles.body_text}\n` +
+        `- Headings: ${designSystem.palette_roles.heading_text}\n` +
+        `- Subtle/secondary: ${designSystem.palette_roles.subtle_text}\n` +
+        `- Borders: ${designSystem.palette_roles.border}\n` +
+        `- Background: ${designSystem.palette_roles.background} · Surface: ${designSystem.palette_roles.surface}\n` +
+        `- Contrast sections: ${designSystem.palette_roles.contrast_section_bg.join(', ')}\n` +
+        `- Disabled: ${designSystem.palette_roles.disabled}\n\n` +
+        designSystem.palette_rules.map(r => `- ${r}`).join('\n') +
+        // Keep universal KB color principles (contrast, 60-30-10) alongside design system
+        (contrastQuickRef ? `\n\n**Contrast quick-ref:** ${contrastQuickRef}` : '') +
+        (sixtyThirtyTen ? `\n**60/30/10 distribution:** ${sixtyThirtyTen}` : '')
+      : `\n## Color Strategy\n${COLOR_ADVICE[emphasis] ?? ''}${colorKBSection}`
     : ''
 
   // Visual KB principles
@@ -1250,6 +1382,16 @@ export function designPage(input: DesignPageInput): string {
     ? `\n> **Progressive mode:** ${skippedDomains.join(', ')} already covered — use "redo [domain]" in context to revisit.`
     : ''
 
+  // ── Design system constraints section ────────────────────────────────────
+  const designSystemSection = designSystem && flags.design_system
+    ? `\n## ${designSystem.name} Design System Constraints\n\n` +
+      `> ${designSystem.description}\n\n` +
+      `### DO\n${designSystem.rules_do.map(r => `- ${r}`).join('\n')}\n\n` +
+      `### DON'T\n${designSystem.rules_dont.map(r => `- ${r}`).join('\n')}\n\n` +
+      `**Spacing:** ${designSystem.spacing.notes}\n` +
+      `**Shadows:** ${designSystem.shadows.notes}`
+    : ''
+
   return `# UI Design Strategy: ${page_type.replace(/_/g, ' ')} for ${audience}
 
 ## Intent Signature
@@ -1267,7 +1409,7 @@ ${principleSection}
 ${mistakes}
 
 ---
-${layoutSection}${typographySection}${colorSection}${visualKBSection}${brandKBSection}
+${designSystemSection}${layoutSection}${typographySection}${colorSection}${visualKBSection}${brandKBSection}
 ${kbChecklist}
 `
 }
