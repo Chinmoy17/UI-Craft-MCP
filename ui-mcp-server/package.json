@@ -1,6 +1,6 @@
 {
   "name": "@chinmoy_mitra/ui-craft",
-  "version": "0.4.5",
+  "version": "0.4.6",
   "description": "UI Design Assistant MCP server — psychology-backed design decisions",
   "main": "dist/server.js",
   "bin": {
