@@ -2,7 +2,7 @@
 
 > Psychology-backed UI design assistant for AI coding agents — via Model Context Protocol (MCP)
 
-Stop asking your agent to "make it look good." Give it a real design brain.
+Stop asking your agent to "make it look good." Give it a real design brain.(checking)
 
 ---
 
