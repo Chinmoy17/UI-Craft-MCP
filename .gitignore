@@ -18,6 +18,9 @@ build/
 *.log
 npm-debug.log*
 
+# Confidential design system specs (only .enc files are committed)
+**/design-system/*.json
+
 ARCHITECTURE.md
 
 # Internal dev docs (local only)
