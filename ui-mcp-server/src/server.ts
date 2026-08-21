@@ -8,6 +8,7 @@ import {
   appendHistory,
   appendUsageEvent,
   initContextSystem,
+  listProjects,
   loadContext,
   loadState,
   loadUsage,
@@ -81,17 +82,22 @@ const projectContextShape = {
 
 registerTool(
   'get_project_context',
-  'Read the current project context stored in the local .vscode/ui-assistant/context.json file for this user workspace.',
+  'Read the current project context. When a project_name is set, context is stored in a global per-project directory (~/.ui-craft/projects/<slug>/) so it persists across workspaces.',
   {},
   async () => {
     const context = loadContext()
+    const projects = listProjects()
 
-    return {
-      content: [{
-        type: 'text',
-        text: JSON.stringify(context, null, 2),
-      }],
+    const parts: Array<{ type: 'text'; text: string }> = [
+      { type: 'text', text: JSON.stringify(context, null, 2) },
+    ]
+
+    if (projects.length > 0) {
+      const list = projects.map(p => `  - ${p.project_name} (${p.slug})`).join('\n')
+      parts.push({ type: 'text', text: `\nAvailable projects:\n${list}` })
     }
+
+    return { content: parts }
   }
 )
 
