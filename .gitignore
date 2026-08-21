@@ -8,6 +8,7 @@ build/
 # Environment
 .env
 .env.local
+.env.example
 
 # Editor
 .vscode/settings.json
