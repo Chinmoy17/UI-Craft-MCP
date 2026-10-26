@@ -8,43 +8,6 @@ const STORAGE_DIRNAME = 'ui-assistant'
 const WORKSPACE_DIR_ENV = 'UI_CRAFT_WORKSPACE_DIR'
 const STORAGE_DIR_ENV = 'UI_CRAFT_STORAGE_DIR'
 
-// ─── Multi-project support ───────────────────────────────────────────────────
-
-const GLOBAL_PROJECTS_DIR = path.join(
-  process.env.USERPROFILE ?? process.env.HOME ?? os.homedir(),
-  '.ui-craft',
-  'projects',
-)
-
-let _activeProjectSlug: string | null = null
-let _activeProjectLoaded = false
-
-function slugify(name: string): string {
-  return name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'default'
-}
-
-function readActiveProjectSlug(workspaceRoot: string): string | null {
-  try {
-    const raw = fs.readFileSync(path.join(workspaceRoot, 'active_project.json'), 'utf-8')
-    const { slug } = JSON.parse(raw)
-    return slug || null
-  } catch {
-    return null
-  }
-}
-
-function writeActiveProject(workspaceRoot: string, projectName: string): string {
-  if (!fs.existsSync(workspaceRoot)) fs.mkdirSync(workspaceRoot, { recursive: true })
-  const slug = slugify(projectName)
-  fs.writeFileSync(
-    path.join(workspaceRoot, 'active_project.json'),
-    JSON.stringify({ slug, project_name: projectName }, null, 2),
-  )
-  _activeProjectSlug = slug
-  _activeProjectLoaded = true
-  return slug
-}
-
 // ─── Usage tracking ──────────────────────────────────────────────────────────
 
 /**
@@ -773,34 +736,23 @@ function resolveWorkspaceRoot(): string {
 }
 
 function getStoragePaths() {
+  // Data lives in the project itself (<project>/.vscode/ui-assistant/), so it is
+  // easy to inspect, travels with the repo, and never leaks across projects.
   const workspaceRoot = resolveWorkspaceRoot()
 
-  if (!_activeProjectLoaded) {
-    _activeProjectSlug = readActiveProjectSlug(workspaceRoot)
-    _activeProjectLoaded = true
-  }
-
-  const storageDir = _activeProjectSlug
-    ? path.join(GLOBAL_PROJECTS_DIR, _activeProjectSlug)
-    : workspaceRoot
-
   return {
-    storageDir,
+    storageDir: workspaceRoot,
     workspaceRoot,
-    contextFile: path.join(storageDir, 'context.json'),
-    stateFile: path.join(storageDir, 'state.json'),
-    historyFile: path.join(storageDir, 'history.json'),
-    notesFile: path.join(storageDir, 'notes.md'),
-    usageFile: path.join(storageDir, 'usage.json'),
+    contextFile: path.join(workspaceRoot, 'context.json'),
+    stateFile: path.join(workspaceRoot, 'state.json'),
+    historyFile: path.join(workspaceRoot, 'history.json'),
+    notesFile: path.join(workspaceRoot, 'notes.md'),
+    usageFile: path.join(workspaceRoot, 'usage.json'),
   }
 }
 
 function ensureStorageDir(): ReturnType<typeof getStoragePaths> {
   const storagePaths = getStoragePaths()
-
-  if (storagePaths.workspaceRoot !== storagePaths.storageDir && !fs.existsSync(storagePaths.workspaceRoot)) {
-    fs.mkdirSync(storagePaths.workspaceRoot, { recursive: true })
-  }
 
   if (!fs.existsSync(storagePaths.storageDir)) {
     fs.mkdirSync(storagePaths.storageDir, { recursive: true })
@@ -852,8 +804,8 @@ function loadEnvFile(storageDir: string): void {
 export function initContextSystem(): void {
   const storagePaths = ensureStorageDir()
 
-  // .env lives in workspace root (shared config), not per-project dir
-  loadEnvFile(storagePaths.workspaceRoot)
+  // .env lives alongside the project's data in its path-keyed storage folder
+  loadEnvFile(storagePaths.storageDir)
 
   if (!fs.existsSync(storagePaths.contextFile)) {
     fs.writeFileSync(storagePaths.contextFile, JSON.stringify(DEFAULT_CONTEXT, null, 2))
@@ -942,16 +894,8 @@ export function loadContext(): ProjectContext {
 export function saveContext(updates: ProjectContextUpdate): ProjectContext {
   initContextSystem()
 
-  // Switch to project-specific global dir when project_name changes
-  if (updates.project_name) {
-    const newSlug = slugify(updates.project_name)
-    if (newSlug !== _activeProjectSlug) {
-      const { workspaceRoot } = getStoragePaths()
-      writeActiveProject(workspaceRoot, updates.project_name)
-      ensureStorageDir()
-    }
-  }
-
+  // project_name is just a display label now; the storage location is derived
+  // from the workspace path, so renaming never moves or collides with data.
   const current = loadContext()
   const { contextFile } = getStoragePaths()
   const merged = mergeContext(current, updates)
@@ -1010,20 +954,4 @@ export function appendHistory(entry: Omit<HistoryEntry, 'timestamp'>): void {
       last_tool: entry.tool,
     },
   })
-}
-
-export function listProjects(): Array<{ slug: string; project_name: string }> {
-  const results: Array<{ slug: string; project_name: string }> = []
-  try {
-    if (!fs.existsSync(GLOBAL_PROJECTS_DIR)) return results
-    for (const slug of fs.readdirSync(GLOBAL_PROJECTS_DIR)) {
-      const ctxFile = path.join(GLOBAL_PROJECTS_DIR, slug, 'context.json')
-      try {
-        const raw = fs.readFileSync(ctxFile, 'utf-8')
-        const ctx = JSON.parse(raw)
-        results.push({ slug, project_name: ctx.project_name || slug })
-      } catch { /* skip invalid entries */ }
-    }
-  } catch { /* intentionally silent */ }
-  return results
 }
