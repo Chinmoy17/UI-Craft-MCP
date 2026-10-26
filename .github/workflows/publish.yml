@@ -29,6 +29,10 @@ jobs:
         working-directory: ui-mcp-server
         run: npm run build
 
+      - name: Test
+        working-directory: ui-mcp-server
+        run: npm test
+
       - name: Publish to npm
         working-directory: ui-mcp-server
         run: npm publish --access=public
