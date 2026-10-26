@@ -84,9 +84,9 @@ Your agent then writes JSX / Tailwind with that brief in hand — with intent, n
 
 ## What it looks like once installed
 
-![UI Craft's 7 tools in the VS Code Configure Tools panel, alongside built-in edit / execute / read / search / web tools and other MCP servers](./docs/images/vscode-tools-panel.png)
+![UI Craft's tools in the VS Code Configure Tools panel, alongside built-in edit / execute / read / search / web tools and other MCP servers](./docs/images/vscode-tools-panel.png)
 
-*UI Craft's seven tools sit alongside VS Code's built-in agent tools (edit, execute, read, search, web) and any other MCP servers you've installed. Your agent picks them automatically based on what you ask.*
+*UI Craft's six tools sit alongside VS Code's built-in agent tools (edit, execute, read, search, web) and any other MCP servers you've installed. Your agent picks them automatically based on what you ask.*
 
 ---
 
@@ -111,9 +111,9 @@ Modern agents (Copilot, Claude Code, Cursor) will parse the setup block below, w
 ### ⚙️ Manual — one JSON block
 
 <details open>
-<summary><b>VS Code (GitHub Copilot / Claude in VS Code)</b></summary>
+<summary><b>VS Code (GitHub Copilot / Claude in VS Code)</b> — one-time setup, works in every project</summary>
 
-Create `.vscode/mcp.json` in your project:
+Run **MCP: Open User Configuration** from the Command Palette and add:
 
 ```json
 {
@@ -129,7 +129,11 @@ Create `.vscode/mcp.json` in your project:
 
 Restart VS Code. Flip Copilot Chat to **Agent mode**.
 
-Alternative via command palette: `Ctrl+Shift+P` → **MCP: Add Server** → command `npx`, args `-y @chinmoy_mitra/ui-craft@latest`, name `ui-craft`.
+UI Craft asks the editor which folder is open and creates `.vscode/ui-assistant/` there the first time a tool is used. Register it once — don't also add it to a project's `.vscode/mcp.json`, or two copies will run.
+
+Want upgrades to be deliberate? Replace `@latest` with an exact version such as `@0.5.0`.
+
+Alternative via command palette: `Ctrl+Shift+P` → **MCP: Add Server** → command `npx`, args `-y @chinmoy_mitra/ui-craft@latest`, name `ui-craft`, scope **Global**.
 
 </details>
 
@@ -182,13 +186,13 @@ No install step. `npx` fetches the package on first run and caches it. Content i
 **Two ways:**
 
 1. `Ctrl+Shift+P` → **MCP: List Servers** — `ui-craft` should be marked **Running**.
-2. `Ctrl+Shift+P` → **Chat: Configure Tools** — expand the `ui-craft` group and you'll see all seven tools ready to be called (same view as the screenshot above).
+2. `Ctrl+Shift+P` → **Chat: Configure Tools** — expand the `ui-craft` group and you'll see all six tools ready to be called (same view as the screenshot above).
 
 If it's missing, check `Output → MCP` in VS Code for the server logs.
 
 ---
 
-## The 7 tools
+## The 6 tools
 
 | Tool | What it does | Example prompt (in Agent mode) |
 |---|---|---|
@@ -196,9 +200,8 @@ If it's missing, check `Output → MCP` in VS Code for the server logs.
 | `design_page` | Single-shot design brief for a specific page type + emphasis. Returns layout, typography, color, top psychology principles, common mistakes, checklist. | *"What layout should I use for a settings page focused on speed?"* |
 | `start_session` | MCQ-style onboarding. Captures working mode, surface, goal, audience, tone, density, change behavior — writes to session state. | *"Start a UI Craft session — I'm redesigning an existing dashboard for admins."* |
 | `set_project_context` | Persist project-wide context (industry, audience, brand tokens, stack, must-keeps) so every future recommendation is tailored. | *"Set project context: industry fintech, audience portfolio managers, primary color #0F52BA, stack Next.js + Tailwind, dark theme."* |
-| `get_project_context` | Read the current stored context. | *"Show me the current UI Craft project context."* |
-| `get_session_state` | Current stage, resolved KB domains, pending questions. Useful to check what's already covered before another call. | *"What has UI Craft already resolved for this page?"* |
-| `get_usage_stats` | Local anonymous counters — tool call counts, page types designed. **No PII, never leaves your disk.** | *"Show my UI Craft usage stats."* |
+| `get_project_context` | Read the stored context (only the fields that are set) plus the last few actions. | *"Show me the current UI Craft project context."* |
+| `get_status` | UI Craft version, where this workspace's data lives, current stage, resolved KB domains, recent activity, usage counts. Pass `include_projects` to list every project UI Craft has been used in. **No PII, never leaves your disk.** | *"What version of UI Craft is running, and what has it covered for this page?"* |
 
 ---
 
@@ -247,21 +250,23 @@ Contributor / extension guide: **[ARCHITECTURE.md](./ARCHITECTURE.md)**.
 
 ## Local-first & private
 
-Every piece of state lives inside your workspace, under `.vscode/ui-assistant/`:
+Every piece of project data lives inside your workspace, under `.vscode/ui-assistant/`, created the first time a tool is used:
 
 ```
 .vscode/ui-assistant/
-  context.json      ← project name, audience, industry, brand, stack, must-keeps
+  context.json      ← project name, audience, industry, brand, stack, rules
   state.json        ← active page, session stage, resolved KB domains
-  history.json      ← last 10 tool calls (for continuity across sessions)
-  notes.md          ← your feedback carried forward between calls
-  usage.json        ← anonymous local counters (install-scoped random UUID)
+  history.json      ← last 20 tool calls (time, tool, one-line summary)
+  usage.json        ← anonymous local counters + the UI Craft version that last wrote
+  .gitignore        ← ignores the whole folder, so nothing is committed by accident
 ```
 
+The only thing kept outside the workspace is a small index at `~/.ui-assistant/projects.json` (project path, name, start date) — no project data. Run `get_status` with `include_projects` to see it.
+
 - **No cloud sync.** Nothing is uploaded.
-- **No PII.** The `install_id` in `usage.json` is a random UUID scoped to your install location, not to you.
+- **No PII.** The `install_id` in `usage.json` is a random UUID scoped to the project folder, not to you.
 - **Opt-in telemetry only.** If you *want* to share anonymous counts, set `UI_CRAFT_TELEMETRY_URL` in the MCP env block. Off by default. HTTPS-only. No PII in the payload.
-- **Your feedback lives.** Tell the agent "I don't like a serif for this brand" — it goes into `notes.md` and shows up in the next brief for the same project.
+- **Project rules live in `context.json`.** Tell the agent "never use a serif for this brand" — it is saved as a `custom_rules` entry and shows up in the next brief for the same project.
 
 ---
 
@@ -271,12 +276,11 @@ Every piece of state lives inside your workspace, under `.vscode/ui-assistant/`:
 UI_Assitant_AI/
 ├── ui-mcp-server/          ← the npm package (this is what users install)
 │   ├── src/
-│   │   ├── server.ts       ← MCP entry point — registers all 7 tools
-│   │   ├── tools/          ← design_page · orchestrator · start_session
+│   │   ├── server.ts       ← MCP entry point — registers all 6 tools
+│   │   ├── tools/          ← design_page · orchestrator · start_session · status
 │   │   ├── content/        ← knowledge base (JSON, domain-partitioned)
-│   │   ├── storage/        ← .vscode/ui-assistant/ read/write layer
-│   │   └── crypto/         ← optional design-system encryption
-│   └── scripts/            ← build helpers (add-shebang, copy-content)
+│   │   └── storage/        ← .vscode/ui-assistant/ read/write layer
+│   └── scripts/            ← build helpers (add-shebang, copy-content) + test-tools
 │
 ├── ui-psychology-lab/      ← interactive React + Vite educational app
 │                             (14 principle demos — separate from the MCP server)
@@ -292,13 +296,13 @@ UI_Assitant_AI/
 
 ## Roadmap
 
-**Shipped (v0.4.6):**
+**Shipped (v0.5.0):**
 - ✅ `design_page` with page_type × emphasis × audience × industry × device adaptation
 - ✅ Orchestrator (`run_session`) — full state machine with retries and structured fallbacks
 - ✅ `start_session` MCQ onboarding
 - ✅ Per-project persistent context (`get_project_context` / `set_project_context`)
-- ✅ Session state introspection (`get_session_state`)
-- ✅ Local anonymous usage stats (`get_usage_stats`)
+- ✅ One-time global setup; data stays in each workspace (`.vscode/ui-assistant/`), created on first use
+- ✅ Status and usage in one tool (`get_status`), version always read from `package.json`
 - ✅ Domain-gated KB with progressive session mode (typography / color / layout / brand / visual)
 - ✅ CI/CD auto-publish to npm on push to main
 
