@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * ui-craft integration test — full coverage
- * Tests all 7 MCP tools + a complete user-flow case study.
+ * Tests all 6 MCP tools + a complete user-flow case study.
  * Runs directly against compiled dist/ — no MCP protocol layer needed.
  * Set UI_CRAFT_STORAGE_DIR to an isolated temp dir before any require().
  *
@@ -17,7 +17,9 @@ const fs   = require('fs')
 
 // ── 1. Isolated storage before any require ────────────────────────────────
 const TEST_STORAGE = path.join(os.tmpdir(), `ui-craft-test-${Date.now()}`)
+const TEST_HOME    = path.join(os.tmpdir(), `ui-craft-home-${Date.now()}`)
 process.env.UI_CRAFT_STORAGE_DIR = TEST_STORAGE
+process.env.UI_CRAFT_HOME = TEST_HOME   // keeps the project registry out of the real home folder
 fs.mkdirSync(TEST_STORAGE, { recursive: true })
 
 const DIST        = path.join(__dirname, '..', 'dist')
@@ -29,11 +31,18 @@ const storage     = require(path.join(DIST, 'storage', 'storage.js'))
 const dpModule    = require(path.join(DIST, 'tools', 'design_page.js'))
 const ssModule    = require(path.join(DIST, 'tools', 'start_session.js'))
 const orchModule  = require(path.join(DIST, 'tools', 'orchestrator.js'))
+const statusModule = require(path.join(DIST, 'tools', 'status.js'))
+const versionModule = require(path.join(DIST, 'version.js'))
 
-const { initContextSystem, saveContext, loadContext, loadState, saveState, loadUsage, appendUsageEvent } = storage
+const {
+  initContextSystem, saveContext, loadContext, loadState, saveState, loadUsage, appendUsageEvent,
+  appendHistory, loadHistory, setWorkspaceRoots, takeNotice, getWorkspaceInfo, listRegisteredProjects,
+} = storage
 const { designPage } = dpModule
 const { startSession } = ssModule
 const { runSession } = orchModule
+const { buildStatusText, buildContextText } = statusModule
+const { VERSION } = versionModule
 
 // ── 3. Helpers ─────────────────────────────────────────────────────────────
 let passed = 0, failed = 0
@@ -605,62 +614,9 @@ test('All 7 page types produce >500 chars in full mode', () => {
 section('9. run_session — orchestrator')
 // ──────────────────────────────────────────────────────────────────────────
 
-// Helper: build the get_session_state output the same way server.ts does
-function buildSessionStateText() {
-  const state = loadState()
-  const { current_stage, last_tool, updated_at, active_page, session } = state
-  const resolvedDomains = active_page.resolved_domains ?? []
-  const allDomains = ['typography', 'color', 'layout', 'brand', 'visual']
-  const pendingDomains = allDomains.filter(d => !resolvedDomains.includes(d))
-  return [
-    '## UI Craft — Session State',
-    '',
-    `**Stage:** ${current_stage} | **Mode:** ${session.session_mode ?? 'full'} | **Last tool:** ${last_tool || 'none'}`,
-    `**Updated:** ${updated_at || 'not yet'}`,
-    `**Active page:** ${active_page.page_id || 'none'} (confidence: ${Math.round(active_page.analysis_confidence * 100)}%)`,
-    '',
-    '### Domain Resolution',
-    `**Resolved:** ${resolvedDomains.length > 0 ? resolvedDomains.join(', ') : 'none yet'}`,
-    `**Pending:** ${pendingDomains.length > 0 ? pendingDomains.join(', ') : 'all resolved'}`,
-    '',
-    session.pending_questions.length > 0
-      ? `### Open Questions\n${session.pending_questions.map(q => `- ${q}`).join('\n')}`
-      : '### Open Questions\nNone.',
-    '',
-    '> To reset resolved domains, start a new session with `run_session` or `start_session`.',
-    '> To revisit a resolved domain, include "redo [domain]" in your next `design_page` context.',
-  ].join('\n')
-}
-
-// Helper: build the get_usage_stats output the same way server.ts does
-function buildUsageStatsText() {
-  const usage = loadUsage()
-  if (!usage) return 'No usage data available yet. Run a session first.'
-  const toolRows = Object.entries(usage.tool_calls)
-    .sort(([, a], [, b]) => b - a)
-    .map(([tool, count]) => `| ${tool} | ${count} |`)
-    .join('\n')
-  const pageRows = Object.entries(usage.page_types)
-    .sort(([, a], [, b]) => b - a)
-    .map(([pt, count]) => `| ${pt} | ${count} |`)
-    .join('\n')
-  return [
-    '## UI Craft — Local Usage Stats',
-    `Version: ${usage.version} | Install ID: \`${usage.install_id}\``,
-    `First seen: ${usage.first_seen.slice(0, 10)} | Last active: ${usage.last_seen.slice(0, 10)}`,
-    `Total sessions: **${usage.total_sessions}**`,
-    '',
-    '### Tool Calls',
-    '| Tool | Calls |',
-    '|------|-------|',
-    toolRows || '| (none yet) | — |',
-    '',
-    '### Page Types Designed',
-    '| Page Type | Count |',
-    '|-----------|-------|',
-    pageRows || '| (none yet) | — |',
-  ].join('\n')
-}
+// get_status output comes straight from the module the server uses
+const buildSessionStateText = () => buildStatusText()
+const buildUsageStatsText = () => buildStatusText()
 
 // Reset to lab context
 saveContext({
@@ -873,31 +829,31 @@ saveContext({
 })
 
 // ──────────────────────────────────────────────────────────────────────────
-section('11. get_session_state')
+section('11. get_status — session state')
 // ──────────────────────────────────────────────────────────────────────────
 
-test('returns expected markdown structure', () => {
+test('returns expected structure', () => {
   freshState('full')
   const text = buildSessionStateText()
-  has(text, '## UI Craft — Session State')
-  has(text, '**Stage:**')
-  has(text, '**Mode:**')
-  has(text, '### Domain Resolution')
-  has(text, '**Resolved:**')
-  has(text, '**Pending:**')
-  has(text, '### Open Questions')
+  has(text, `## UI Craft ${VERSION}`)
+  has(text, 'Storage:')
+  has(text, 'Stage:')
+  has(text, 'Mode:')
+  has(text, 'Domains resolved:')
+  has(text, 'pending:')
+  has(text, 'Open questions:')
 })
 
 test('reflects full session_mode correctly', () => {
   saveState({ session: { session_mode: 'full' } })
   const text = buildSessionStateText()
-  has(text, '**Mode:** full')
+  has(text, 'Mode: full')
 })
 
 test('reflects progressive session_mode correctly', () => {
   saveState({ session: { session_mode: 'progressive' } })
   const text = buildSessionStateText()
-  has(text, '**Mode:** progressive')
+  has(text, 'Mode: progressive')
 })
 
 test('resolved domains appear in output after design_page call', () => {
@@ -910,7 +866,7 @@ test('resolved domains appear in output after design_page call', () => {
     has(text, state.active_page.resolved_domains[0])
   }
   // Pending should be the complement
-  has(text, '**Pending:**')
+  has(text, 'pending:')
 })
 
 test('pending domains shrink after full pass', () => {
@@ -924,14 +880,14 @@ test('pending domains shrink after full pass', () => {
   assert(pending.length === 0, `Expected 0 pending, got ${pending.length}: [${pending}]`)
 })
 
-test('get_session_state shows none yet when no design_page called', () => {
+test('get_status shows none yet when no design_page called', () => {
   freshState('full')
   const text = buildSessionStateText()
   has(text, 'none yet')
 })
 
 // ──────────────────────────────────────────────────────────────────────────
-section('12. get_usage_stats + appendUsageEvent')
+section('12. usage tracking — appendUsageEvent / recordSession / version')
 // ──────────────────────────────────────────────────────────────────────────
 
 test('loadUsage returns object with required fields after init', () => {
@@ -947,37 +903,35 @@ test('loadUsage returns object with required fields after init', () => {
 test('appendUsageEvent increments tool_calls', () => {
   const before = loadUsage()
   const beforeCount = before?.tool_calls['design_page'] ?? 0
-  appendUsageEvent('design_page', {})
+  appendUsageEvent('design_page')
   const after = loadUsage()
   const afterCount = after?.tool_calls['design_page'] ?? 0
   assert(afterCount === beforeCount + 1, `Expected ${beforeCount + 1}, got ${afterCount}`)
 })
 
+test('usage.json version is the package.json version after any event', () => {
+  appendUsageEvent('design_page')
+  assert(loadUsage().version === VERSION, `usage.version=${loadUsage().version}, VERSION=${VERSION}`)
+})
+
 test('appendUsageEvent does not throw for unknown tool name', () => {
   let threw = false
-  try { appendUsageEvent('nonexistent_tool_xyz', {}) } catch { threw = true }
+  try { appendUsageEvent('nonexistent_tool_xyz') } catch { threw = true }
   assert(!threw, 'appendUsageEvent should never throw')
 })
 
-test('appendUsageEvent does not throw with null/undefined options', () => {
-  let threw = false
-  try { appendUsageEvent('design_page', null) } catch { threw = true }
-  try { appendUsageEvent('design_page', undefined) } catch { threw = true }
-  assert(!threw, 'appendUsageEvent should be safe with null/undefined')
-})
-
-test('buildUsageStatsText returns valid markdown', () => {
-  appendUsageEvent('start_session', {})
-  appendUsageEvent('design_page', {})
+test('get_status usage block lists tools and page types', () => {
+  appendUsageEvent('start_session')
+  appendUsageEvent('design_page')
   const text = buildUsageStatsText()
-  has(text, '## UI Craft — Local Usage Stats')
-  has(text, '### Tool Calls')
-  has(text, '### Page Types Designed')
+  has(text, 'Usage since')
+  has(text, 'Tools:')
+  has(text, 'Page types:')
   has(text, 'design_page')
-  printSample('get_usage_stats output', text, 30)
+  printSample('get_status output', text, 30)
 })
 
-test('buildUsageStatsText no [object Object] in output', () => {
+test('get_status no [object Object] in output', () => {
   const text = buildUsageStatsText()
   hasNot(text, '[object Object]')
   hasNot(text, 'undefined')
@@ -1041,8 +995,8 @@ test('[CS-02] Agent calls run_session to kick off design for landing page', () =
 
 test('[CS-03] Agent checks session state — all domains resolved after run_session', () => {
   const text = buildSessionStateText()
-  has(text, '## UI Craft — Session State')
-  has(text, '**Mode:**')
+  has(text, `## UI Craft ${VERSION}`)
+  has(text, 'Mode:')
   // Should have resolved at least some domains
   const state = loadState()
   assert(state.active_page.resolved_domains.length > 0,
@@ -1119,10 +1073,10 @@ test('[CS-07] Agent requests redo of color domain after seeing output', () => {
 
 test('[CS-08] usage stats reflect all tool calls from case study', () => {
   // Append some usage events to simulate what server.ts would do
-  appendUsageEvent('run_session', {})
-  appendUsageEvent('design_page', {})
-  appendUsageEvent('design_page', {})
-  appendUsageEvent('design_page', {})
+  appendUsageEvent('run_session')
+  appendUsageEvent('design_page')
+  appendUsageEvent('design_page')
+  appendUsageEvent('design_page')
 
   const usage = loadUsage()
   assert(usage !== null, 'usage should exist')
@@ -1153,34 +1107,392 @@ test('[CS-09] no undefined or object leak across all case study outputs', () => 
   caseLog('CS-09', 'Clean output: no serialization leaks')
 })
 
-// Print case study summary
-if (CASE_STUDY || VERBOSE) {
-  console.log('\n' + '═'.repeat(60))
-  console.log('  CASE STUDY TRACE — UI Psychology Lab')
-  console.log('═'.repeat(60))
-  caseStudyLog.forEach(({ step, text }) => console.log(`  [${step}] ${text}`))
-  console.log()
+// ───────────────────────────────────────────────────────────────────────────────────
+section('14. workspace storage — resolution, lazy creation, migration, history, registry')
+// ───────────────────────────────────────────────────────────────────────────────────
+
+const tmpDirs = []
+function tmpDir(label) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), `ui-craft-${label}-`))
+  tmpDirs.push(dir)
+  return dir
 }
+function real(p) { return fs.realpathSync.native(p) }
+const storeDir = ws => path.join(ws, '.vscode', 'ui-assistant')
+const NO_OVERRIDES = { UI_CRAFT_STORAGE_DIR: undefined, UI_CRAFT_WORKSPACE_DIR: undefined, INIT_CWD: undefined }
+
+// Runs fn with env vars set (undefined = unset) and restores them afterwards.
+function withEnv(vars, fn) {
+  const saved = {}
+  for (const [key, value] of Object.entries(vars)) {
+    saved[key] = process.env[key]
+    if (value === undefined) delete process.env[key]
+    else process.env[key] = value
+  }
+  try { return fn() } finally {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+  }
+}
+const inWorkspace = (ws, fn) => withEnv({ ...NO_OVERRIDES, UI_CRAFT_WORKSPACE_DIR: ws }, fn)
+
+function inDir(dir, fn) {
+  const previous = process.cwd()
+  process.chdir(dir)
+  try { return fn() } finally { process.chdir(previous) }
+}
+
+takeNotice()
+
+test('storage appears only on first use, under <workspace>/.vscode/ui-assistant', () => {
+  const ws = tmpDir('lazy')
+  inWorkspace(ws, () => {
+    assert(!fs.existsSync(path.join(ws, '.vscode')), 'nothing should exist before first use')
+    loadContext()
+    const files = fs.readdirSync(storeDir(ws)).sort()
+    assert(files.join(',') === '.gitignore,context.json,history.json,state.json,usage.json', `unexpected files: ${files}`)
+  })
+})
+
+test('the folder ignores itself in git', () => {
+  const ws = tmpDir('ignore')
+  inWorkspace(ws, () => {
+    loadContext()
+    assert(fs.readFileSync(path.join(storeDir(ws), '.gitignore'), 'utf-8').trim() === '*', '.gitignore should contain "*"')
+  })
+})
+
+test('legacy context.json is migrated: version -> schema_version, design_system dropped', () => {
+  const ws = tmpDir('migrate')
+  fs.mkdirSync(storeDir(ws), { recursive: true })
+  fs.writeFileSync(path.join(storeDir(ws), 'context.json'),
+    JSON.stringify({ version: '1.0', project_name: 'Old Project', design_system: 'bytemethod', audience: 'admins' }))
+  inWorkspace(ws, () => {
+    const ctx = loadContext()
+    assert(ctx.project_name === 'Old Project' && ctx.audience === 'admins', 'user data must survive migration')
+    assert(typeof ctx.schema_version === 'string' && !('version' in ctx) && !('design_system' in ctx), 'legacy keys should be gone')
+    const onDisk = JSON.parse(fs.readFileSync(path.join(storeDir(ws), 'context.json'), 'utf-8'))
+    assert(!('version' in onDisk) && !('design_system' in onDisk) && onDisk.schema_version === ctx.schema_version, 'file should be rewritten')
+  })
+})
+
+test('history keeps the newest 20 entries as compact {timestamp, tool, summary}', () => {
+  const ws = tmpDir('history')
+  inWorkspace(ws, () => {
+    for (let i = 0; i < 25; i++) appendHistory({ tool: 'design_page', summary: `entry ${i}` })
+    const history = loadHistory()
+    assert(history.length === 20, `expected 20 entries, got ${history.length}`)
+    assert(history[0].summary === 'entry 24' && history[19].summary === 'entry 5', 'order should be newest first')
+    assert(Object.keys(history[0]).sort().join(',') === 'summary,timestamp,tool', 'entry should be compact')
+  })
+})
+
+test('history drops tool inputs from older releases and clips long summaries', () => {
+  const ws = tmpDir('history-legacy')
+  fs.mkdirSync(storeDir(ws), { recursive: true })
+  fs.writeFileSync(path.join(storeDir(ws), 'history.json'), JSON.stringify([
+    { timestamp: '2026-01-01T00:00:00.000Z', tool: 'run_session', input: { context: 'x'.repeat(5000) }, summary: 'old' },
+  ]))
+  inWorkspace(ws, () => {
+    appendHistory({ tool: 'design_page', summary: 'y'.repeat(500) })
+    const raw = fs.readFileSync(path.join(storeDir(ws), 'history.json'), 'utf-8')
+    assert(!raw.includes('"input"') && raw.length < 1500, `history.json should be compact (${raw.length} bytes)`)
+    assert(loadHistory()[0].summary.length <= 120, 'summary should be clipped')
+  })
+})
+
+test('get_project_context text omits empty fields and internal keys, then lists recent activity', () => {
+  const ws = tmpDir('ctxview')
+  inWorkspace(ws, () => {
+    saveContext({ project_name: 'View Test', stack: 'Next.js' })
+    appendHistory({ tool: 'set_project_context', summary: 'updated: project_name, stack' })
+    const text = buildContextText()
+    const json = JSON.parse(text.split('\n')[0])
+    assert(json.project_name === 'View Test' && json.stack === 'Next.js', 'set fields should be present')
+    assert(!('audience' in json) && !('schema_version' in json) && !('knowledge_state' in json), 'empty/internal keys should be omitted')
+    has(text, 'Recent activity')
+    has(text, 'set_project_context: updated: project_name, stack')
+  })
+})
+
+test('no workspace reported: current folder is used and a one-time notice is raised', () => {
+  const ws = tmpDir('cwd')
+  inDir(ws, () => withEnv(NO_OVERRIDES, () => {
+    setWorkspaceRoots([])
+    takeNotice()
+    const info = getWorkspaceInfo()
+    assert(info.source === 'cwd' && real(info.root) === real(ws), `got ${info.source} ${info.root}`)
+    loadContext()
+    const notice = takeNotice()
+    assert(notice && notice.includes('current folder'), 'expected a notice about the current-folder fallback')
+    assert(takeNotice() === null, 'notice should be returned only once')
+  }))
+})
+
+test('git root above the working folder is preferred over the folder itself', () => {
+  const repo = tmpDir('git')
+  fs.mkdirSync(path.join(repo, '.git'))
+  const sub = path.join(repo, 'packages', 'app')
+  fs.mkdirSync(sub, { recursive: true })
+  inDir(sub, () => withEnv(NO_OVERRIDES, () => {
+    setWorkspaceRoots([])
+    const info = getWorkspaceInfo()
+    assert(info.source === 'git-root' && real(info.root) === real(repo), `got ${info.source} ${info.root}`)
+  }))
+})
+
+test('MCP client roots win over the working folder', () => {
+  const ws = tmpDir('roots')
+  const elsewhere = tmpDir('elsewhere')
+  inDir(elsewhere, () => withEnv(NO_OVERRIDES, () => {
+    setWorkspaceRoots([ws])
+    try {
+      const info = getWorkspaceInfo()
+      assert(info.source === 'mcp-roots' && real(info.root) === real(ws), `got ${info.source} ${info.root}`)
+    } finally { setWorkspaceRoots([]) }
+  }))
+})
+
+test('UI_CRAFT_WORKSPACE_DIR wins over client roots', () => {
+  const ws = tmpDir('env-ws')
+  const rootFolder = tmpDir('env-root')
+  withEnv({ ...NO_OVERRIDES, UI_CRAFT_WORKSPACE_DIR: ws }, () => {
+    setWorkspaceRoots([rootFolder])
+    try {
+      assert(getWorkspaceInfo().source === 'env-workspace', 'env override should win')
+    } finally { setWorkspaceRoots([]) }
+  })
+})
+
+test('started inside an npm install folder with no roots: refuses to guess', () => {
+  const installDir = path.join(tmpDir('install'), 'node_modules', 'pkg')
+  fs.mkdirSync(installDir, { recursive: true })
+  inDir(installDir, () => withEnv(NO_OVERRIDES, () => {
+    setWorkspaceRoots([])
+    let error = null
+    try { getWorkspaceInfo() } catch (err) { error = err }
+    assert(error && error.constructor.name === 'NoWorkspaceError', `expected NoWorkspaceError, got ${error}`)
+  }))
+})
+
+test('first use inside/next to existing UI Craft data raises a "same project?" notice', () => {
+  const parent = tmpDir('nearby')
+  const child = path.join(parent, 'child')
+  fs.mkdirSync(child)
+  inWorkspace(parent, () => { saveContext({ project_name: 'Parent Site' }); takeNotice() })
+  inWorkspace(child, () => {
+    loadContext()
+    const notice = takeNotice()
+    assert(notice, 'expected a notice')
+    has(notice, parent)
+    has(notice, 'Parent Site')
+    has(notice, 'same project')
+  })
+})
+
+test('reusing a project name from another folder raises a notice', () => {
+  const first = tmpDir('dupe-a')
+  const second = tmpDir('dupe-b')
+  inWorkspace(first, () => { saveContext({ project_name: 'Dupe Name' }); takeNotice() })
+  inWorkspace(second, () => {
+    takeNotice()
+    saveContext({ project_name: 'dupe name' })
+    const notice = takeNotice()
+    assert(notice && notice.includes(first), 'expected the notice to point at the other folder')
+  })
+})
+
+test('project registry records path, name and start date outside the workspace', () => {
+  const ws = tmpDir('registry')
+  inWorkspace(ws, () => { saveContext({ project_name: 'Registry Test' }) })
+  const entry = listRegisteredProjects(200).find(p => p.path === path.resolve(ws))
+  assert(entry, 'project missing from registry')
+  assert(entry.project_name === 'Registry Test' && /^\d{4}-\d{2}-\d{2}T/.test(entry.started), `bad entry: ${JSON.stringify(entry)}`)
+  assert(fs.existsSync(path.join(TEST_HOME, '.ui-assistant', 'projects.json')), 'registry should live under UI_CRAFT_HOME')
+  has(buildStatusText(true), 'Registry Test')
+})
+
+test('get_status hides the project list unless asked', () => {
+  hasNot(buildStatusText(false), 'Projects on this machine')
+})
+
+test('VERSION comes from package.json', () => {
+  const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf-8'))
+  assert(VERSION === pkg.version, `VERSION=${VERSION}, package.json=${pkg.version}`)
+})
+
+test('no hard-coded version strings in src', () => {
+  const hits = []
+  const walk = dir => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name)
+      if (entry.isDirectory()) { if (entry.name !== 'content') walk(full); continue }
+      if (!entry.name.endsWith('.ts')) continue
+      const found = fs.readFileSync(full, 'utf-8').match(/['"`]\d+\.\d+\.\d+['"`]/g)
+      if (found) hits.push(`${full}: ${found.join(', ')}`)
+    }
+  }
+  walk(path.join(__dirname, '..', 'src'))
+  assert(hits.length === 0, hits.join('\n'))
+})
+
+test('design-system feature and its encrypted spec are gone', () => {
+  assert(!fs.existsSync(path.join(DIST, 'crypto')), 'dist/crypto should not exist')
+  assert(!fs.existsSync(path.join(DIST, 'content', 'kb', 'design-system')), 'design-system content should not ship')
+})
+
+test('design_page records page types in usage.json', () => {
+  const before = loadUsage()
+  designPage({ page_type: 'pricing', audience: 'buyers', emphasis: 'clarity' })
+  const after = loadUsage()
+  assert((after.page_types.pricing ?? 0) === (before.page_types.pricing ?? 0) + 1, 'page type should be recorded once per call')
+})
+
+// ───────────────────────────────────────────────────────────────────────────────────
+// 15. MCP over stdio, end to end (async, runs after the synchronous sections)
+// ───────────────────────────────────────────────────────────────────────────────────
+
+async function runE2E() {
+  const { spawn } = require('child_process')
+  const { pathToFileURL } = require('url')
+
+  const ws = tmpDir('e2e-ws')
+  const decoyCwd = tmpDir('e2e-cwd')
+  const home = tmpDir('e2e-home')
+  const env = { ...process.env, UI_CRAFT_HOME: home }
+  for (const key of ['UI_CRAFT_STORAGE_DIR', 'UI_CRAFT_WORKSPACE_DIR', 'INIT_CWD']) delete env[key]
+
+  // The server starts in a folder that is NOT the workspace; the client reports the real one via roots.
+  const child = spawn(process.execPath, [path.join(DIST, 'server.js')], { cwd: decoyCwd, env, stdio: ['pipe', 'pipe', 'pipe'] })
+  let stderr = ''
+  child.stderr.on('data', chunk => { stderr += chunk })
+
+  const pending = new Map()
+  let buffer = ''
+  child.stdout.on('data', chunk => {
+    buffer += chunk
+    let newline
+    while ((newline = buffer.indexOf('\n')) >= 0) {
+      const line = buffer.slice(0, newline).trim()
+      buffer = buffer.slice(newline + 1)
+      if (!line) continue
+      let message
+      try { message = JSON.parse(line) } catch { continue }
+      if (message.method === 'roots/list') {
+        child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: message.id, result: { roots: [{ uri: pathToFileURL(ws).href, name: 'ws' }] } }) + '\n')
+      } else if (message.id !== undefined && pending.has(message.id)) {
+        pending.get(message.id)(message)
+        pending.delete(message.id)
+      }
+    }
+  })
+
+  const request = (id, method, params) => new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`timeout waiting for ${method}`)), 15000)
+    pending.set(id, message => { clearTimeout(timer); resolve(message) })
+    child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n')
+  })
+  const textOf = response => response.result.content.map(c => c.text).join('\n')
+  const call = (id, name, args = {}) => request(id, 'tools/call', { name, arguments: args })
+
+  const seen = {}
+  let failure = null
+  try {
+    await request(1, 'initialize', {
+      protocolVersion: '2025-06-18',
+      capabilities: { roots: { listChanged: true } },
+      clientInfo: { name: 'ui-craft-test', version: '0' },
+    })
+    child.stdin.write(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized', params: {} }) + '\n')
+
+    seen.tools = (await request(2, 'tools/list', {})).result.tools.map(t => t.name).sort()
+    seen.filesBeforeFirstCall = fs.existsSync(path.join(ws, '.vscode')) || fs.existsSync(path.join(decoyCwd, '.vscode'))
+    seen.status = textOf(await call(3, 'get_status'))
+    await call(4, 'set_project_context', { project_name: 'E2E Project', stack: 'Vite' })
+    seen.context = textOf(await call(5, 'get_project_context'))
+    await call(6, 'run_session', { page_type: 'dashboard', audience: 'developers' })
+  } catch (err) {
+    failure = err
+  } finally {
+    child.kill()
+  }
+
+  section('15. MCP stdio end-to-end — roots, lazy creation, tools')
+
+  test('server answers the MCP handshake and tool calls', () => {
+    assert(!failure, `${failure}\n${stderr}`)
+  })
+  test('exposes exactly the 6 tools', () => {
+    const expected = ['design_page', 'get_project_context', 'get_status', 'run_session', 'set_project_context', 'start_session']
+    assert(JSON.stringify(seen.tools) === JSON.stringify(expected), `tools: ${seen.tools}`)
+  })
+  test('starting the server and listing tools creates no files', () => {
+    assert(seen.filesBeforeFirstCall === false, 'a .vscode folder appeared before any tool was called')
+  })
+  test('data goes to the client-reported root, not the server working folder', () => {
+    assert(fs.existsSync(path.join(storeDir(ws), 'context.json')), 'context.json missing in the workspace root')
+    assert(!fs.existsSync(path.join(decoyCwd, '.vscode')), 'working folder must stay untouched')
+    assert((seen.status ?? '').toLowerCase().includes(storeDir(ws).toLowerCase()), `status should name the storage folder:\n${seen.status}`)
+  })
+  test('get_status reports the package.json version', () => {
+    has(seen.status ?? '', `## UI Craft ${VERSION}`)
+  })
+  test('get_project_context returns the saved context', () => {
+    has(seen.context ?? '', 'E2E Project')
+  })
+  test('usage.json and history.json are updated by the server wrapper', () => {
+    const usage = JSON.parse(fs.readFileSync(path.join(storeDir(ws), 'usage.json'), 'utf-8'))
+    assert(usage.version === VERSION, `usage.version=${usage.version}`)
+    assert(usage.tool_calls.get_status >= 1 && usage.tool_calls.set_project_context >= 1 && usage.tool_calls.get_project_context >= 1,
+      `tool_calls: ${JSON.stringify(usage.tool_calls)}`)
+    assert(usage.total_sessions === 1, `run_session should count as exactly one session, got ${usage.total_sessions}`)
+    assert((usage.page_types.dashboard ?? 0) >= 1, 'design output inside run_session should record its page type')
+    const history = JSON.parse(fs.readFileSync(path.join(storeDir(ws), 'history.json'), 'utf-8'))
+    assert(history[0].tool === 'run_session', 'history should log run_session')
+    assert(history.some(h => h.tool === 'set_project_context'), 'history should log set_project_context')
+  })
+  test('project is listed in the machine-wide registry', () => {
+    const registry = JSON.parse(fs.readFileSync(path.join(home, '.ui-assistant', 'projects.json'), 'utf-8'))
+    assert(registry.some(p => p.project_name === 'E2E Project'), 'registry entry with the project name missing')
+  })
+}
+
+function finish() {
+  // Print case study summary
+  if (CASE_STUDY || VERBOSE) {
+    console.log('\n' + '═'.repeat(60))
+    console.log('  CASE STUDY TRACE — UI Psychology Lab')
+    console.log('═'.repeat(60))
+    caseStudyLog.forEach(({ step, text }) => console.log(`  [${step}] ${text}`))
+    console.log()
+  }
 
 // ──────────────────────────────────────────────────────────────────────────
 // Summary
 // ──────────────────────────────────────────────────────────────────────────
 
-console.log(`\n${'═'.repeat(60)}`)
-console.log(`  RESULTS:  ${passed} passed   ${failed} failed   ${passed + failed} total`)
-console.log('═'.repeat(60))
+  console.log(`\n${'═'.repeat(60)}`)
+  console.log(`  RESULTS:  ${passed} passed   ${failed} failed   ${passed + failed} total`)
+  console.log('═'.repeat(60))
 
-if (failures.length > 0) {
-  console.log('\nFailed tests:')
-  failures.forEach(f => {
-    console.log(`  [${f.section}]`)
-    console.log(`  ✗ ${f.name}`)
-    console.log(`    ${f.error}\n`)
-  })
+  if (failures.length > 0) {
+    console.log('\nFailed tests:')
+    failures.forEach(f => {
+      console.log(`  [${f.section}]`)
+      console.log(`  ✗ ${f.name}`)
+      console.log(`    ${f.error}\n`)
+    })
+  }
+
+  // Cleanup temp folders
+  for (const dir of [TEST_STORAGE, TEST_HOME, ...tmpDirs]) {
+    try { fs.rmSync(dir, { recursive: true, force: true }) } catch {}
+  }
+
+  process.exit(failed > 0 ? 1 : 0)
 }
 
-// Cleanup temp storage
-try { fs.rmSync(TEST_STORAGE, { recursive: true, force: true }) } catch {}
-
-process.exit(failed > 0 ? 1 : 0)
+runE2E().catch(err => { failed++; failures.push({ section: '15', name: 'e2e harness', error: err.message }) }).then(finish)
 

@@ -8,7 +8,6 @@ build/
 # Environment
 .env
 .env.local
-.env.example
 
 # Editor
 .vscode/settings.json
@@ -18,9 +17,6 @@ build/
 # Logs
 *.log
 npm-debug.log*
-
-# Confidential design system specs (only .enc files are committed)
-**/design-system/*.json
 
 ARCHITECTURE.md
 

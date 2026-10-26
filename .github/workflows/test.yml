@@ -1,0 +1,63 @@
+name: Test
+
+on:
+  pull_request:
+    branches: [dev, main]
+  push:
+    branches: [dev, main]
+  workflow_dispatch:
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (${{ matrix.os }}, node ${{ matrix.node }})
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.experimental == true }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        node: ['18', '20', '22']
+        include:
+          - os: windows-latest
+            node: '20'
+          # Informational only: a failure here does not block merging.
+          - os: macos-latest
+            node: '20'
+            experimental: true
+    defaults:
+      run:
+        working-directory: ui-mcp-server
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+          cache-dependency-path: ui-mcp-server/package-lock.json
+
+      - run: npm ci
+
+      # "pretest" compiles first, so type errors fail the run too.
+      - run: npm test
+
+  # Single, stable check name for branch protection ("Tests").
+  tests-passed:
+    name: Tests
+    needs: test
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail unless every required test job passed
+        run: |
+          if [ "${{ needs.test.result }}" != "success" ]; then
+            echo "Test jobs finished with: ${{ needs.test.result }}"
+            exit 1
+          fi
