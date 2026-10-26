@@ -36,9 +36,9 @@ No install needed. Runs via `npx` on demand.
 
 ## Setup
 
-### VS Code (GitHub Copilot / Claude)
+### VS Code (GitHub Copilot / Claude) — one-time setup
 
-Create `.vscode/mcp.json` in your project:
+Run **MCP: Open User Configuration** from the Command Palette and add:
 
 ```json
 {
@@ -52,7 +52,9 @@ Create `.vscode/mcp.json` in your project:
 }
 ```
 
-Restart VS Code. Switch Copilot Chat to **Agent mode**. Done.
+Restart VS Code. Switch Copilot Chat to **Agent mode**. Done — UI Craft now works in every project.
+
+Register it once (don't also add it to a project's `.vscode/mcp.json`). Replace `@latest` with an exact version such as `@0.5.0` if you want upgrades to be deliberate.
 
 ---
 
@@ -119,11 +121,11 @@ The agent will automatically call the `design_page` tool and return a full desig
 
 ### `get_project_context`
 
-Reads the current local project context from `.vscode/ui-assistant/context.json`.
+Reads the project context saved in `.vscode/ui-assistant/context.json` (only fields that are set) plus the last few actions.
 
 ### `set_project_context`
 
-Updates the local project context used by `design_page`.
+Saves the project context used by `design_page`. Only the fields you pass change; lists are replaced.
 
 Supported fields:
 
@@ -137,24 +139,36 @@ Supported fields:
 - `device_targets`
 - `custom_rules`
 
+### `start_session` / `run_session`
+
+Guided onboarding and a full plan → design → evaluate pass in one call.
+
+### `get_status`
+
+Shows the running UI Craft version, where this workspace's data is stored, the current stage, resolved design domains, recent activity and usage counts. Pass `include_projects` to list the projects UI Craft has been used in on this machine.
+
 ## Local Project Storage
 
-UI Craft stores project-aware state inside the user workspace:
+The first time a tool is used, UI Craft creates this folder in the open workspace:
 
 ```text
 .vscode/ui-assistant/
-  context.json
-  state.json
-  history.json
-  notes.md
+  context.json   project context
+  state.json     session progress
+  history.json   last 20 tool calls (time, tool, summary)
+  usage.json     local counters and the UI Craft version that last wrote
+  .gitignore     ignores the folder
 ```
 
-Resolution order:
+The workspace is found in this order:
 
 - `UI_CRAFT_STORAGE_DIR` for a direct storage folder override
 - `UI_CRAFT_WORKSPACE_DIR` for a workspace-root override
-- `INIT_CWD` when launched via `npx`
-- `process.cwd()` as the final fallback
+- the folder the editor reports as open (MCP roots)
+- the nearest git root above the working directory (never the home folder or above)
+- the working directory
+
+Only a small index (`~/.ui-assistant/projects.json`: path, name, start date) is kept outside the workspace.
 
 ---
 

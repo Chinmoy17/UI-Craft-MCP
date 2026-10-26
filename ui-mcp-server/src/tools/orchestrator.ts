@@ -11,7 +11,7 @@
  * - Every stage retries up to MAX_RETRIES on failure with exponential backoff.
  * - If retries are exhausted, a structured fallback is emitted -- never silent failure.
  * - Storage is guaranteed to be initialized before any stage runs.
- * - Works for both local and global MCP installs (git root detection in storage.ts).
+ * - Works wherever the MCP server is registered: the workspace is resolved in storage.ts.
  */
 
 import { z } from 'zod'
@@ -22,10 +22,8 @@ import {
   loadContext,
   loadState,
   saveState,
-  appendUsageEvent,
   type ProjectContext,
 } from '../storage/storage.js'
-const SERVER_VERSION = '0.4.5'
 
 // --- Zod shape (all optional -- orchestrator resolves what it can) ---------------
 
@@ -547,13 +545,6 @@ export function runSession(raw: RunSessionInput): OrchestratorResult {
     stageResults.push(evaluateResult)
     saveState({ current_stage: 'DONE', updated_at: new Date().toISOString() })
     log('DONE', 'session complete')
-
-    // Record local anonymous usage
-    appendUsageEvent('run_session', {
-      page_type: resolved.page_type,
-      version: SERVER_VERSION,
-      is_session: true,
-    })
 
     const allSuccess = stageResults.every(s => s.success)
     const combinedOutput = [

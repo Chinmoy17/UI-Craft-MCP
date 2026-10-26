@@ -2,11 +2,15 @@ import * as fs from 'fs'
 import * as path from 'path'
 import * as os from 'os'
 import { randomUUID } from 'crypto'
+import { VERSION } from '../version.js'
 
-const HISTORY_LIMIT = 10
+const HISTORY_LIMIT = 20
 const STORAGE_DIRNAME = 'ui-assistant'
 const WORKSPACE_DIR_ENV = 'UI_CRAFT_WORKSPACE_DIR'
 const STORAGE_DIR_ENV = 'UI_CRAFT_STORAGE_DIR'
+const HOME_DIR_ENV = 'UI_CRAFT_HOME'
+const CONTEXT_SCHEMA_VERSION = '2.0'
+const REGISTRY_LIMIT = 200
 
 // ─── Usage tracking ──────────────────────────────────────────────────────────
 
@@ -66,12 +70,11 @@ export interface KnowledgeState {
 }
 
 export interface ProjectContext {
-  version: string
+  schema_version: string
   project_name: string
   stack: string
   audience: string
   industry: string
-  design_system: string
   brand: BrandContext
   device_targets: string[]
   custom_rules: string[]
@@ -83,7 +86,6 @@ export interface ProjectContext {
 export interface HistoryEntry {
   timestamp: string
   tool: string
-  input: Record<string, unknown>
   summary: string
 }
 
@@ -249,12 +251,10 @@ export interface SignalScoreUpdate {
 }
 
 export interface ProjectContextUpdate {
-  version?: string
   project_name?: string
   stack?: string
   audience?: string
   industry?: string
-  design_system?: string
   brand?: {
     primary_color?: string
     font?: string
@@ -360,12 +360,11 @@ export interface StorageStateUpdate {
 }
 
 const DEFAULT_CONTEXT: ProjectContext = {
-  version: '1.1',
+  schema_version: CONTEXT_SCHEMA_VERSION,
   project_name: '',
   stack: '',
   audience: '',
   industry: '',
-  design_system: '',
   brand: {
     primary_color: '',
     font: '',
@@ -672,168 +671,293 @@ function isLikelyInstallPath(candidate: string): boolean {
   )
 }
 
+function samePath(a: string, b: string): boolean {
+  return process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b
+}
+
 /**
- * Walk up from `startDir` looking for a `.git` directory.
- * Returns the git root if found, null otherwise.
- * Stops at filesystem root to avoid infinite loops.
+ * Walk up from `startDir` looking for a `.git` entry.
+ * Never returns the home directory or anything above it.
  */
 function findGitRoot(startDir: string): string | null {
+  const home = path.resolve(os.homedir())
   let current = path.resolve(startDir)
   const { root } = path.parse(current)
-  while (current !== root) {
+  while (!samePath(current, root) && !samePath(current, home)) {
     if (fs.existsSync(path.join(current, '.git'))) return current
     const parent = path.dirname(current)
-    if (parent === current) break   // reached root
+    if (parent === current) break
     current = parent
   }
   return null
 }
 
+export type RootSource = 'env-storage' | 'env-workspace' | 'mcp-roots' | 'git-root' | 'cwd'
+
+export interface WorkspaceInfo {
+  /** Folder holding context.json, state.json, ... */
+  dir: string
+  /** Project root that owns `dir`; null when UI_CRAFT_STORAGE_DIR points straight at a data folder. */
+  root: string | null
+  source: RootSource
+}
+
+export class NoWorkspaceError extends Error {}
+
+let _clientRoots: string[] = []
+
+/** Workspace folders reported by the MCP client (roots/list). The first one is used. */
+export function setWorkspaceRoots(roots: string[]): void {
+  _clientRoots = roots.map(r => path.resolve(r))
+}
+
+function storageDirFor(root: string): string {
+  return path.join(path.resolve(root), '.vscode', STORAGE_DIRNAME)
+}
+
 /**
- * Resolve where to write .vscode/ui-assistant/ files.
+ * Where this project's data lives: <root>/.vscode/ui-assistant/
  *
- * Priority (highest to lowest):
- *  1. UI_CRAFT_STORAGE_DIR env var  → use that directory directly
- *  2. UI_CRAFT_WORKSPACE_DIR env var → <dir>/.vscode/ui-assistant/
- *  3. Git root detected from INIT_CWD or cwd → <git-root>/.vscode/ui-assistant/
- *  4. INIT_CWD or cwd (not an install path) → <cwd>/.vscode/ui-assistant/
- *  5. Home directory fallback → ~/.ui-craft/global/
- *
- * This ensures global MCP installs still write project-scoped files when
- * running inside a git repo, and fall back to a stable home dir location
- * when no project context is detectable.
+ * Root priority:
+ *  1. UI_CRAFT_STORAGE_DIR   (data folder, used as-is)
+ *  2. UI_CRAFT_WORKSPACE_DIR (project root)
+ *  3. First MCP client root  (the folder open in the editor)
+ *  4. Nearest git root above the working directory (never home or above)
+ *  5. The working directory itself
  */
-function resolveWorkspaceRoot(): string {
-  // 1. Explicit storage dir override
-  const configuredStorageDir = process.env[STORAGE_DIR_ENV]
-  if (configuredStorageDir) {
-    return path.resolve(configuredStorageDir)
+export function getWorkspaceInfo(): WorkspaceInfo {
+  const storageOverride = process.env[STORAGE_DIR_ENV]
+  if (storageOverride) {
+    return { dir: path.resolve(storageOverride), root: null, source: 'env-storage' }
   }
 
-  // 2. Explicit workspace dir override
-  const configuredWorkspaceDir = process.env[WORKSPACE_DIR_ENV]
-  if (configuredWorkspaceDir) {
-    return path.join(path.resolve(configuredWorkspaceDir), '.vscode', STORAGE_DIRNAME)
+  const workspaceOverride = process.env[WORKSPACE_DIR_ENV]
+  if (workspaceOverride) {
+    return { dir: storageDirFor(workspaceOverride), root: path.resolve(workspaceOverride), source: 'env-workspace' }
   }
 
-  // 3. Git root detection — most reliable for global MCP installs
-  const seeds = [process.env.INIT_CWD, process.cwd()].filter(Boolean) as string[]
-  const preferredSeed = seeds.find(seed => !isLikelyInstallPath(seed)) ?? seeds[0] ?? process.cwd()
-
-  const gitRoot = findGitRoot(preferredSeed)
-  if (gitRoot && !isLikelyInstallPath(gitRoot)) {
-    return path.join(gitRoot, '.vscode', STORAGE_DIRNAME)
+  if (_clientRoots.length > 0) {
+    return { dir: storageDirFor(_clientRoots[0]), root: _clientRoots[0], source: 'mcp-roots' }
   }
 
-  // 4. Non-install cwd
-  if (!isLikelyInstallPath(preferredSeed)) {
-    return path.join(path.resolve(preferredSeed), '.vscode', STORAGE_DIRNAME)
+  const seed = [process.cwd(), process.env.INIT_CWD].find(s => s && !isLikelyInstallPath(s))
+  if (!seed) {
+    throw new NoWorkspaceError(
+      'No workspace found: the server was started inside an npm install folder and the editor reported no workspace root. ' +
+      `Set "cwd": "\${workspaceFolder}" in the MCP server config, or the ${WORKSPACE_DIR_ENV} environment variable.`,
+    )
   }
 
-  // 5. Home directory fallback — used when MCP is global and no project detected
-  const homeDir = process.env.USERPROFILE ?? process.env.HOME ?? os.homedir()
-  return path.join(homeDir, '.ui-craft', 'global')
+  const gitRoot = findGitRoot(seed)
+  if (gitRoot) return { dir: storageDirFor(gitRoot), root: gitRoot, source: 'git-root' }
+  return { dir: storageDirFor(seed), root: path.resolve(seed), source: 'cwd' }
 }
 
 function getStoragePaths() {
-  // Data lives in the project itself (<project>/.vscode/ui-assistant/), so it is
-  // easy to inspect, travels with the repo, and never leaks across projects.
-  const workspaceRoot = resolveWorkspaceRoot()
-
+  const info = getWorkspaceInfo()
   return {
-    storageDir: workspaceRoot,
-    workspaceRoot,
-    contextFile: path.join(workspaceRoot, 'context.json'),
-    stateFile: path.join(workspaceRoot, 'state.json'),
-    historyFile: path.join(workspaceRoot, 'history.json'),
-    notesFile: path.join(workspaceRoot, 'notes.md'),
-    usageFile: path.join(workspaceRoot, 'usage.json'),
+    info,
+    dir: info.dir,
+    contextFile: path.join(info.dir, 'context.json'),
+    stateFile: path.join(info.dir, 'state.json'),
+    historyFile: path.join(info.dir, 'history.json'),
+    usageFile: path.join(info.dir, 'usage.json'),
+    ignoreFile: path.join(info.dir, '.gitignore'),
   }
 }
 
-function ensureStorageDir(): ReturnType<typeof getStoragePaths> {
-  const storagePaths = getStoragePaths()
+// ─── Project registry (machine-wide index of project folders; holds no project data) ───
 
-  if (!fs.existsSync(storagePaths.storageDir)) {
-    fs.mkdirSync(storagePaths.storageDir, { recursive: true })
-  }
-
-  return storagePaths
+export interface RegistryEntry {
+  path: string
+  project_name: string
+  started: string
+  last_used: string
 }
 
-/**
- * Load .env file from the storage directory into process.env.
- * Only sets variables that are not already defined (env vars take precedence).
- * Creates a .env.example if no .env exists.
- */
-let _envLoaded = false
-function loadEnvFile(storageDir: string): void {
-  if (_envLoaded) return
-  _envLoaded = true
+function registryFile(): string {
+  return path.join(process.env[HOME_DIR_ENV] ?? os.homedir(), '.ui-assistant', 'projects.json')
+}
 
-  const envFile = path.join(storageDir, '.env')
-  const exampleFile = path.join(storageDir, '.env.example')
-
-  if (!fs.existsSync(envFile)) {
-    // Create .env.example as a hint for new developers
-    if (!fs.existsSync(exampleFile)) {
-      try {
-        fs.writeFileSync(exampleFile, '# UI Craft Design System Key\n# UI_CRAFT_DS_KEY=your-passphrase-here\n')
-      } catch { /* non-critical */ }
-    }
-    return
-  }
-
+function readRegistry(): RegistryEntry[] {
   try {
-    const content = fs.readFileSync(envFile, 'utf-8')
-    for (const line of content.split('\n')) {
-      const trimmed = line.trim()
-      if (!trimmed || trimmed.startsWith('#')) continue
-      const eqIndex = trimmed.indexOf('=')
-      if (eqIndex < 1) continue
-      const key = trimmed.slice(0, eqIndex).trim()
-      const value = trimmed.slice(eqIndex + 1).trim()
-      // Only set if not already defined — system env takes precedence
-      if (!process.env[key]) {
-        process.env[key] = value
-      }
+    const parsed = JSON.parse(fs.readFileSync(registryFile(), 'utf-8'))
+    return Array.isArray(parsed) ? (parsed as RegistryEntry[]) : []
+  } catch {
+    return []
+  }
+}
+
+/** Adds or refreshes a project in the index. Never throws. */
+export function registerProject(root: string, projectName?: string, started?: string): void {
+  try {
+    const file = registryFile()
+    const entries = readRegistry()
+    const now = new Date().toISOString()
+    const existing = entries.find(e => samePath(e.path, root))
+    if (existing) {
+      existing.last_used = now
+      if (projectName) existing.project_name = projectName
+    } else {
+      entries.push({ path: root, project_name: projectName ?? '', started: started ?? now, last_used: now })
     }
-  } catch { /* non-critical — .env loading must never break tool execution */ }
+    entries.sort((a, b) => b.last_used.localeCompare(a.last_used))
+    fs.mkdirSync(path.dirname(file), { recursive: true })
+    fs.writeFileSync(file, JSON.stringify(entries.slice(0, REGISTRY_LIMIT), null, 2))
+  } catch {
+    // the index is a convenience and must never block a tool call
+  }
+}
+
+export function listRegisteredProjects(limit = 10): RegistryEntry[] {
+  return readRegistry().slice(0, limit)
+}
+
+// ─── First-use notice: look for similar UI Craft data in surrounding folders ───
+
+const SKIP_DIRS = new Set(['node_modules', 'dist', 'build', 'out', 'venv', '__pycache__'])
+
+function pathKey(p: string): string {
+  return process.platform === 'win32' ? p.toLowerCase() : p
+}
+
+function listSubdirs(folder: string, cap: number): string[] {
+  try {
+    return fs.readdirSync(folder, { withFileTypes: true })
+      .filter(e => e.isDirectory() && !e.name.startsWith('.') && !SKIP_DIRS.has(e.name))
+      .slice(0, cap)
+      .map(e => path.join(folder, e.name))
+  } catch {
+    return []
+  }
+}
+
+function readProjectName(folder: string): string {
+  try {
+    const ctx = JSON.parse(fs.readFileSync(path.join(storageDirFor(folder), 'context.json'), 'utf-8')) as { project_name?: string }
+    return ctx.project_name ?? ''
+  } catch {
+    return ''
+  }
+}
+
+/** Parent and child folders (two levels down) that already hold UI Craft data. */
+function findNearbyProjects(root: string): Array<{ path: string; project_name: string }> {
+  const home = path.resolve(os.homedir())
+  const candidates: string[] = []
+
+  let up = root
+  for (let i = 0; i < 3; i++) {
+    const parent = path.dirname(up)
+    if (parent === up || samePath(parent, home)) break
+    candidates.push(parent)
+    up = parent
+  }
+  for (const child of listSubdirs(root, 100)) {
+    candidates.push(child, ...listSubdirs(child, 50))
+  }
+
+  const seen = new Set<string>()
+  const found: Array<{ path: string; project_name: string }> = []
+  for (const candidate of candidates) {
+    const key = pathKey(candidate)
+    if (seen.has(key) || samePath(candidate, root)) continue
+    seen.add(key)
+    if (fs.existsSync(path.join(storageDirFor(candidate), 'context.json'))) {
+      found.push({ path: candidate, project_name: readProjectName(candidate) })
+      if (found.length >= 5) break
+    }
+  }
+  return found
+}
+
+let _pendingNotice: string | null = null
+
+function addNotice(text: string): void {
+  _pendingNotice = _pendingNotice ? `${_pendingNotice}\n\n${text}` : text
+}
+/** One-time message about a newly created storage folder. Returned once, then cleared. */
+export function takeNotice(): string | null {
+  const notice = _pendingNotice
+  _pendingNotice = null
+  return notice
+}
+
+function buildInitNotice(info: WorkspaceInfo): string | null {
+  const nearby = info.root ? findNearbyProjects(info.root) : []
+  const usedCwd = info.source === 'cwd'
+  if (nearby.length === 0 && !usedCwd) return null
+
+  const lines = [`UI Craft created project storage at ${info.dir} (workspace source: ${info.source}).`]
+  if (usedCwd) {
+    lines.push('No editor workspace root or git repository was found, so the current folder was used. If it is not the project folder, tell the user.')
+  }
+  if (nearby.length > 0) {
+    lines.push('UI Craft data already exists in nearby folders:')
+    for (const n of nearby) lines.push(`- ${n.path}${n.project_name ? ` ("${n.project_name}")` : ''}`)
+    lines.push('Check whether one of them is the same project (for example a parent or child folder opened earlier). If so, tell the user which folder to keep instead of maintaining two copies.')
+  }
+  return lines.join('\n')
+}
+
+// ─── Storage initialisation (lazy: runs on the first tool call that needs data) ───
+
+const _registeredRoots = new Set<string>()
+
+function readFirstSeen(usageFile: string): string | undefined {
+  try {
+    return (JSON.parse(fs.readFileSync(usageFile, 'utf-8')) as { first_seen?: string }).first_seen
+  } catch {
+    return undefined
+  }
 }
 
 export function initContextSystem(): void {
-  const storagePaths = ensureStorageDir()
+  const paths = getStoragePaths()
+  const isNew = !fs.existsSync(paths.contextFile)
 
-  // .env lives alongside the project's data in its path-keyed storage folder
-  loadEnvFile(storagePaths.storageDir)
+  fs.mkdirSync(paths.dir, { recursive: true })
 
-  if (!fs.existsSync(storagePaths.contextFile)) {
-    fs.writeFileSync(storagePaths.contextFile, JSON.stringify(DEFAULT_CONTEXT, null, 2))
+  if (isNew) {
+    fs.writeFileSync(paths.contextFile, JSON.stringify(DEFAULT_CONTEXT, null, 2))
   }
 
-  if (!fs.existsSync(storagePaths.stateFile)) {
-    fs.writeFileSync(storagePaths.stateFile, JSON.stringify(DEFAULT_STATE, null, 2))
+  if (!fs.existsSync(paths.stateFile)) {
+    fs.writeFileSync(paths.stateFile, JSON.stringify(DEFAULT_STATE, null, 2))
   }
 
-  if (!fs.existsSync(storagePaths.historyFile)) {
-    fs.writeFileSync(storagePaths.historyFile, JSON.stringify([], null, 2))
+  if (!fs.existsSync(paths.historyFile)) {
+    fs.writeFileSync(paths.historyFile, JSON.stringify([], null, 2))
   }
 
-  if (!fs.existsSync(storagePaths.notesFile)) {
-    fs.writeFileSync(storagePaths.notesFile, '# UI Craft Notes\n\n')
-  }
-
-  if (!fs.existsSync(storagePaths.usageFile)) {
+  if (!fs.existsSync(paths.usageFile)) {
+    const now = new Date().toISOString()
     const defaultUsage: UsageRecord = {
       install_id: randomUUID(),
-      version: '0.3.0',
-      first_seen: new Date().toISOString(),
-      last_seen: new Date().toISOString(),
+      version: VERSION,
+      first_seen: now,
+      last_seen: now,
       total_sessions: 0,
       page_types: {},
       tool_calls: {},
     }
-    fs.writeFileSync(storagePaths.usageFile, JSON.stringify(defaultUsage, null, 2))
+    fs.writeFileSync(paths.usageFile, JSON.stringify(defaultUsage, null, 2))
+  }
+
+  // Keeps the folder out of git; data stays local to the machine.
+  if (!fs.existsSync(paths.ignoreFile)) {
+    fs.writeFileSync(paths.ignoreFile, '*\n')
+  }
+
+  const { root } = paths.info
+  if (root && !_registeredRoots.has(pathKey(root))) {
+    _registeredRoots.add(pathKey(root))
+    registerProject(root, undefined, readFirstSeen(paths.usageFile))
+  }
+
+  if (isNew) {
+    const notice = buildInitNotice(paths.info)
+    if (notice) addNotice(notice)
   }
 }
 
@@ -850,27 +974,16 @@ export function loadUsage(): UsageRecord | null {
   }
 }
 
-/**
- * Record a tool call event in local usage.json.
- * Never throws — usage tracking must not break tool execution.
- */
-export function appendUsageEvent(
-  toolName: string,
-  options: { page_type?: string; version?: string; is_session?: boolean } = {}
-): void {
+/** Applies `mutate` to usage.json and stamps the running version. Never throws. */
+function updateUsage(mutate: (usage: UsageRecord) => void): void {
   try {
     initContextSystem()
     const { usageFile } = getStoragePaths()
-    const raw = fs.readFileSync(usageFile, 'utf-8')
-    const usage = JSON.parse(raw) as UsageRecord
+    const usage = JSON.parse(fs.readFileSync(usageFile, 'utf-8')) as UsageRecord
 
+    usage.version = VERSION
     usage.last_seen = new Date().toISOString()
-    if (options.version) usage.version = options.version
-    if (options.is_session) usage.total_sessions = (usage.total_sessions ?? 0) + 1
-    usage.tool_calls[toolName] = (usage.tool_calls[toolName] ?? 0) + 1
-    if (options.page_type) {
-      usage.page_types[options.page_type] = (usage.page_types[options.page_type] ?? 0) + 1
-    }
+    mutate(usage)
 
     fs.writeFileSync(usageFile, JSON.stringify(usage, null, 2))
   } catch {
@@ -878,28 +991,69 @@ export function appendUsageEvent(
   }
 }
 
+export function appendUsageEvent(toolName: string): void {
+  updateUsage(u => { u.tool_calls[toolName] = (u.tool_calls[toolName] ?? 0) + 1 })
+}
+
+export function recordSession(): void {
+  updateUsage(u => { u.total_sessions = (u.total_sessions ?? 0) + 1 })
+}
+
+export function recordPageType(pageType: string): void {
+  updateUsage(u => { u.page_types[pageType] = (u.page_types[pageType] ?? 0) + 1 })
+}
+
+// Keys written by older releases that no longer exist in the schema.
+const LEGACY_CONTEXT_KEYS = ['version', 'design_system']
+
+function migrateContext(raw: Record<string, unknown>): ProjectContext {
+  const rest = { ...raw }
+  for (const key of LEGACY_CONTEXT_KEYS) delete rest[key]
+  const merged = mergeContext(DEFAULT_CONTEXT, rest as ProjectContextUpdate)
+  return { ...merged, schema_version: CONTEXT_SCHEMA_VERSION }
+}
+
 export function loadContext(): ProjectContext {
   initContextSystem()
   const { contextFile } = getStoragePaths()
 
   try {
-    const raw = fs.readFileSync(contextFile, 'utf-8')
-    const parsed = JSON.parse(raw) as ProjectContext
-    return mergeContext(DEFAULT_CONTEXT, parsed)
+    const raw = JSON.parse(fs.readFileSync(contextFile, 'utf-8')) as Record<string, unknown>
+    const context = migrateContext(raw)
+
+    const needsRewrite = raw.schema_version !== CONTEXT_SCHEMA_VERSION || LEGACY_CONTEXT_KEYS.some(k => k in raw)
+    if (needsRewrite) {
+      try { fs.writeFileSync(contextFile, JSON.stringify(context, null, 2)) } catch { /* read-only checkout */ }
+    }
+    return context
   } catch {
-    return { ...DEFAULT_CONTEXT }
+    return JSON.parse(JSON.stringify(DEFAULT_CONTEXT)) as ProjectContext
   }
 }
 
 export function saveContext(updates: ProjectContextUpdate): ProjectContext {
   initContextSystem()
 
-  // project_name is just a display label now; the storage location is derived
-  // from the workspace path, so renaming never moves or collides with data.
   const current = loadContext()
-  const { contextFile } = getStoragePaths()
+  const { contextFile, info } = getStoragePaths()
   const merged = mergeContext(current, updates)
   fs.writeFileSync(contextFile, JSON.stringify(merged, null, 2))
+
+  const name = updates.project_name
+  if (name && info.root) {
+    if (name !== current.project_name) {
+      const sameName = listRegisteredProjects(REGISTRY_LIMIT)
+        .filter(e => e.project_name.toLowerCase() === name.toLowerCase() && !samePath(e.path, info.root as string))
+      if (sameName.length > 0) {
+        addNotice(
+          `The project name "${name}" is already used by another folder:\n` +
+          sameName.slice(0, 3).map(e => `- ${e.path} (started ${e.started.slice(0, 10)})`).join('\n') + '\n' +
+          'If it is the same project, tell the user which folder to keep instead of maintaining two copies.',
+        )
+      }
+    }
+    registerProject(info.root, name)
+  }
   return merged
 }
 
@@ -925,26 +1079,37 @@ export function saveState(updates: StorageStateUpdate): StorageState {
   return merged
 }
 
+/** Collapses whitespace and truncates to `max` characters. */
+export function clipText(text: string, max = 100): string {
+  const flat = text.replace(/\s+/g, ' ').trim()
+  return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat
+}
+
+function readHistory(file: string): HistoryEntry[] {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(file, 'utf-8')) as Array<Partial<HistoryEntry>>
+    // Older releases also stored the full tool input; it is dropped here.
+    return parsed.map(e => ({ timestamp: e.timestamp ?? '', tool: e.tool ?? '', summary: e.summary ?? '' }))
+  } catch {
+    return []
+  }
+}
+
+/** Most recent entries first. */
+export function loadHistory(limit = HISTORY_LIMIT): HistoryEntry[] {
+  initContextSystem()
+  return readHistory(getStoragePaths().historyFile).slice(0, limit)
+}
+
 export function appendHistory(entry: Omit<HistoryEntry, 'timestamp'>): void {
   initContextSystem()
-  let history: HistoryEntry[] = []
   const { historyFile } = getStoragePaths()
   const timestamp = new Date().toISOString()
 
-  try {
-    const raw = fs.readFileSync(historyFile, 'utf-8')
-    history = JSON.parse(raw) as HistoryEntry[]
-  } catch {
-    history = []
-  }
+  const history = readHistory(historyFile)
+  history.unshift({ timestamp, tool: entry.tool, summary: clipText(entry.summary, 120) })
 
-  history.unshift({ ...entry, timestamp })
-
-  if (history.length > HISTORY_LIMIT) {
-    history = history.slice(0, HISTORY_LIMIT)
-  }
-
-  fs.writeFileSync(historyFile, JSON.stringify(history, null, 2))
+  fs.writeFileSync(historyFile, JSON.stringify(history.slice(0, HISTORY_LIMIT), null, 2))
 
   saveState({
     current_stage: resolveStageForTool(entry.tool),

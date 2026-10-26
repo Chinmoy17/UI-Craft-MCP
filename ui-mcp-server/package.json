@@ -1,11 +1,14 @@
 {
   "name": "@chinmoy_mitra/ui-craft",
-  "version": "0.4.6",
+  "version": "0.5.0",
   "description": "UI Design Assistant MCP server — psychology-backed design decisions",
   "main": "dist/server.js",
   "bin": {
     "ui-craft": "dist/server.js"
   },
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsc",
     "postbuild": "node scripts/copy-content.js && node scripts/add-shebang.js",
